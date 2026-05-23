@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C++ Object files
+*.o
+*.so
+*.os
+*.a
+
+# CMake & Build
+CMakeCache.txt
+CMakeFiles/
+
+# OS generated
+.DS_Store

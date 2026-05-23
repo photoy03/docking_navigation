@@ -1,0 +1,42 @@
+/**
+ * @file cserialport.i
+ * @author itas109 (itas109@qq.com) \n\n
+ * Blog : https://blog.csdn.net/itas109 \n
+ * Github : https://github.com/itas109 \n
+ * Gitee : https://gitee.com/itas109 \n
+ * QQ Group : 129518033
+ * SWIG: 4.1.0
+ * @brief Python CSerialPort Interface Python的CSerialPort接口
+ */
+// threads="1" enable SWIG_PYTHON_THREADS
+%module(directors="1", threads="1") cserialport
+
+#define DLL_EXPORT
+
+%{
+#include "CSerialPort/SerialPort_global.h"
+#include "CSerialPort/SerialPort.h"
+#include "CSerialPort/SerialPortListener.h"
+#include "CSerialPort/SerialPortInfo.h"
+%}
+
+%include "std_vector.i" // std::vector
+%include "cdata.i"      // cdata memmove for void*
+%include "cmalloc.i"    // malloc free for void*
+%malloc(void)           // malloc void*
+%free(void)             // free void*
+
+%template(SerialPortInfoVector) std::vector<itas109::SerialPortInfo>;
+
+// enable inherit CSerialPortListener interface for receive data
+%feature("director") itas109::CSerialPortListener;
+// enable inherit CSerialPortHotPlugListener interface for hot plug
+%feature("director") itas109::CSerialPortHotPlugListener;
+
+// TODO: support protocol parser
+%ignore itas109::CSerialPort::setProtocolParser;
+
+%include "CSerialPort/SerialPort_global.h"
+%include "CSerialPort/SerialPort.h"
+%include "CSerialPort/SerialPortListener.h"
+%include "CSerialPort/SerialPortInfo.h"

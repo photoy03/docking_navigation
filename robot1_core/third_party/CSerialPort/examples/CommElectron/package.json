@@ -1,0 +1,34 @@
+{
+  "name": "cserialport",
+  "version": "1.0.0",
+  "description": "CSerialPort Electron Example",
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/itas109/CSerialPort.git"
+  },
+  "keywords": [
+    "cserialport",
+    "serial",
+    "serialport",
+    "serialportassistant",
+    "uart",
+    "rs232",
+    "nodeserial",
+    "electronserial"
+  ],
+  "author": "itas109",
+  "license": "LGPL-3.0-or-later",
+  "bugs": {
+    "url": "https://github.com/itas109/CSerialPort/issues"
+  },
+  "homepage": "https://github.com/itas109/CSerialPort",
+  "dependencies": {
+    "electron": "latest",
+    "jquery": "^3.7.1"
+  },
+  "scripts": {
+    "build": "cmake-js rebuild",
+    "start": "electron ."
+  }
+}

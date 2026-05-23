@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <title>CSerialPort Node.js Web Example</title>
+
+    <style>
+        #header {
+            text-align: center;
+            padding: 1px;
+        }
+
+        #left {
+            position: absolute;
+            width: 55%;
+            height: 100%;
+        }
+
+        #right {
+            margin-left: 55%;
+            height: 100%;
+        }
+
+        #receive {
+            width: 50vw;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        #log {
+            width: 40vw;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="header">CSerialPort Node.js Web Example</div>
+
+    <hr />
+
+    <div>
+        <label>PortName</label>
+        <select id="listPortSelect"></select>
+        <label>BaudRate</label>
+        <select id="baudRateSelect"></select>
+        <button id='onOpen' onclick="onOpen()">open</button>
+        <button id='onClose' onclick="onClose()">close</button>
+        <input type="checkbox" id="setDtr" onclick="setDtr(this)" />
+        <label>setDtr</label>
+        <input type="checkbox" id="setRts" onclick="setRts(this)" />
+        <label>setRts</label>
+    </div>
+
+    <hr />
+
+    <div>
+        <input type="checkbox" id="isSendHex" />
+        <label>isSendHex</label>
+        <label>Send</label>
+        <input id='send' type="text" style="width:230px;" value='https://github.com/itas109/CSerialPort'>
+        <button id='onSend' onclick="onSend($('#send').val())">send</button>
+    </div>
+
+    <hr />
+
+    <div id="left">
+        <h2>Receive</h2>
+        <input type="checkbox" id="isReceiveHex" onclick="onSetReceiveMode()" />
+        <label>isReceiveHex</label>
+        <button id='clearReceive' onclick="onClear('#receive')">clear</button>
+        <pre id="receive"></pre>
+    </div>
+
+    <div id="right">
+        <h2>Log</h2>
+        <button id='clearLog' onclick="onClear()">clear</button>
+        <pre id="log"></pre>
+    </div>
+
+    <script src='js/jquery-3.7.1.min.js'></script>
+    <script>
+        // tile
+        $.get("cserialport/getVersion", function (version) {
+            document.title += " - " + version;
+        });
+
+        // listPortSelect
+        const listPortSelect = document.getElementById('listPortSelect');
+        $.get("cserialport/listPorts", function (listPorts) {
+            listPorts.forEach(listPort => {
+                const optionElement = document.createElement('option');
+                optionElement.value = listPort;
+                optionElement.textContent = listPort;
+                listPortSelect.appendChild(optionElement);
+            });
+        });
+
+        // baudRateSelect
+        const baudRateSelect = document.getElementById('baudRateSelect');
+        const baudRateArray = [110, 300, 600, 1200, 2400, 4800, 9600, 14400, 19200, 38400, 57600, 115200, 921600];
+        baudRateArray.forEach(baudRate => {
+            const option = document.createElement('option');
+            option.value = baudRate;
+            option.text = baudRate;
+            if (baudRate === 9600) {
+                option.selected = true; // default selected
+            }
+            baudRateSelect.appendChild(option);
+        });
+    </script>
+    <script>
+        if ('EventSource' in window) {
+            const source = new EventSource('/cserialport/onReadEvent');
+
+            source.onopen = function (event) {
+                output("onReadEvent success");
+            };
+
+            source.onmessage = function (event) {
+                outputReceive(event.data);
+            };
+
+            source.onerror = function (error) {
+                output('EventSource failed. ' + JSON.stringify(error));
+                source.close();
+            };
+        }
+    </script>
+    <script>
+        function output(str, id = '#log') {
+            $(id).append(str + "\n");
+        }
+
+        function outputReceive(str, id = '#receive') {
+            $(id).append(str);
+        }
+
+        function onClear(id = '#log') {
+            $(id).text("");
+        }
+
+        function onOpen() {
+            const params = {
+                portName: $("#listPortSelect option:selected").val(),
+                baudRate: $("#baudRateSelect option:selected").val()
+            };
+            $.get("cserialport/init2", params, function (result) {
+                output(result);
+
+                $.get("cserialport/open", function (result) {
+                    output(params.portName + ' ' + result);
+                });
+            });
+        }
+
+        function onClose() {
+            $.get("cserialport/close", function (result) {
+                output(result);
+            });
+        }
+
+        function onSend(str) {
+            const params = {
+                isHex: $("#isSendHex").is(':checked'),
+                data: encodeURI(str)
+            };
+            $.get("cserialport/writeData", params, function (result) {
+                output(result);
+            });
+        }
+
+        function onSetReceiveMode() {
+            const params = {
+                isReceiveHex: $("#isReceiveHex").is(':checked')
+            };
+            $.get("cserialport/isReceiveHex", params, function (result) {
+                output(result);
+            });
+        }
+
+        function setDtr(checkbox) {
+            $.get("cserialport/setDtr", {
+                isSet: checkbox.checked
+            }, function (result) {
+                output(result);
+            });
+        }
+
+        function setRts(checkbox) {
+            $.get("cserialport/setRts", {
+                isSet: checkbox.checked
+            }, function (result) {
+                output(result);
+            });
+        }
+    </script>
+
+</body>
+
+</html>
