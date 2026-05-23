@@ -1,0 +1,23 @@
+slam_toolbox:
+  ros__parameters:
+    # 1. TF 프레임 일치 (매우 중요)
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_link
+    scan_topic: /scan
+    mode: mapping
+
+    # 2. 통신 지연(Timeout) 대기 시간 증가 (가장 핵심)
+    # rf2o가 연산해서 넘겨주는 시간을 기다려주도록 0.2 -> 0.5로 늘림
+    transform_timeout: 0.5
+    tf_buffer_duration: 30.0
+
+    # 3. 맵핑 파라미터 (RPLidar A1 스펙에 맞춤)
+    resolution: 0.05
+    max_laser_range: 12.0
+    minimum_time_interval: 0.5
+    transform_publish_period: 0.05
+    mapping_publish_period: 2.0
+    use_scan_matching: true
+    use_scan_barycenter: true
+

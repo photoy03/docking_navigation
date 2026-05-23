@@ -1,0 +1,5 @@
+robot1_odom_node:
+  ros__parameters:
+    cpr: 3588.0               # 모터 엔코더 CPR (정수형태도 내부에서 실수로 변환)
+    wheel_diameter: 0.216      # 바퀴 지름 (단위: 미터, 예: 15cm)
+    track_width: 0.45         # 좌우 바퀴 중심축 사이의 거리 (단위: 미터, 예: 45cm)
