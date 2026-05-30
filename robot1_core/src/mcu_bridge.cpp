@@ -20,7 +20,7 @@ public:
     MCUBridge() : Node("mcu_bridge_node"), read_buffer_("")
     {
         // ROS 2 파라미터 선언 (기본 포트: /dev/ttyUSB0, 통신속도: 115200)
-        this->declare_parameter<std::string>("port_name", "/dev/ttyACM0");
+        this->declare_parameter<std::string>("port_name", "/dev/arduino");
         this->declare_parameter<int>("baud_rate", 115200);
 
         std::string port_name = this->get_parameter("port_name").as_string();

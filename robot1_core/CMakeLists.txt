@@ -41,6 +41,10 @@ ament_target_dependencies(mcu_bridge rclcpp std_msgs geometry_msgs)
 # 🌟 중요: 리눅스 시스템 스레드 라이브러리(pthread) 연결 (CSerialPort 필수 요구사항)
 target_link_libraries(mcu_bridge pthread)
 
+
+
+
+
 install(TARGETS
   odom_publisher
   mcu_bridge

@@ -16,28 +16,26 @@ class OdomPublisher : public rclcpp::Node
 {
 public:
     OdomPublisher()
-    : Node("robot1_odom_node"), x_(0.0), y_(0.0), theta_(0.0), imu_yaw_(0.0), use_imu_(false),
+    : Node("robot1_odom_node"), x_(0.0), y_(0.0), theta_(0.0), imu_yaw_(0.0), imu_angular_z_(0.0), use_imu_(false),
       prev_left_tick_(0), prev_right_tick_(0)
     {
-        // 1. ROS 2 파라미터 선언 및 최후의 안전 기본값(Default) 지정
-        this->declare_parameter<double>("cpr", 4000.0);
-        this->declare_parameter<double>("wheel_diameter", 0.15);
+        this->declare_parameter<double>("cpr", 3588.0);
+        this->declare_parameter<double>("wheel_diameter", 0.216);
         this->declare_parameter<double>("track_width", 0.45);
+        this->declare_parameter<double>("imu_trust_factor", 0.1); // IMU 신뢰도 (0.0 ~ 1.0)
+        this->declare_parameter<double>("enc_v_theta_weight", 0.001); // 엔코더 각속도 신뢰도 (0.001 = 0.1%)
+	enc_v_theta_weight_ = this->get_parameter("enc_v_theta_weight").as_double();
 
-        // 2. YAML 또는 외부에서 입력된 실시간 파라미터 획득
         cpr_ = this->get_parameter("cpr").as_double();
         wheel_diameter_ = this->get_parameter("wheel_diameter").as_double();
         track_width_ = this->get_parameter("track_width").as_double();
+        imu_trust_factor_ = this->get_parameter("imu_trust_factor").as_double();
         
-        // 3. 획득한 물리 파라미터를 기반으로 기구학 상수 계산
         distance_per_tick_ = (M_PI * wheel_diameter_) / cpr_;
 
         RCLCPP_INFO(this->get_logger(), "========================================");
         RCLCPP_INFO(this->get_logger(), " 하드웨어 파라미터 동적 바인딩 성공!");
-        RCLCPP_INFO(this->get_logger(), " 모터 CPR: %.1f", cpr_);
-        RCLCPP_INFO(this->get_logger(), " 바퀴 지름: %.3f m", wheel_diameter_);
-        RCLCPP_INFO(this->get_logger(), " 윤거 (Track Width): %.3f m", track_width_);
-        RCLCPP_INFO(this->get_logger(), " 틱당 이동거리: %.8f m", distance_per_tick_);
+        RCLCPP_INFO(this->get_logger(), " IMU 융합 신뢰도 (Alpha): %.2f", imu_trust_factor_);
         RCLCPP_INFO(this->get_logger(), "========================================");
 
         odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("/robot1/odom", 10);
@@ -55,9 +53,14 @@ public:
 private:
     void imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg)
     {
+        // 1. IMU에서 절대 각도(Yaw) 추출
         double siny_cosp = 2.0 * (msg->orientation.w * msg->orientation.z + msg->orientation.x * msg->orientation.y);
         double cosy_cosp = 1.0 - 2.0 * (msg->orientation.y * msg->orientation.y + msg->orientation.z * msg->orientation.z);
         imu_yaw_ = std::atan2(siny_cosp, cosy_cosp);
+
+        // 2. IMU에서 순간 각속도(Z축 회전 속도) 추출
+        imu_angular_z_ = msg->angular_velocity.z;
+
         use_imu_ = true;
     }
 
@@ -75,19 +78,35 @@ private:
         double delta_right = (current_right_tick - prev_right_tick_) * distance_per_tick_;
 
         double d_center = (delta_right + delta_left) / 2.0;
-        double d_theta = (delta_right - delta_left) / track_width_;
+        double d_theta_wheel = (delta_right - delta_left) / track_width_;
 
+        double v_x = d_center / dt;
+        double v_theta = 0.0;
+
+        // 위치(x, y) 업데이트
         x_ += d_center * std::cos(theta_);
         y_ += d_center * std::sin(theta_);
 
         if (use_imu_) {
-            theta_ = imu_yaw_;
-        } else {
-            theta_ += d_theta;
-        }
+            // [자세(Theta) 상보 필터]
+            theta_ += d_theta_wheel; 
+            double yaw_error = std::atan2(std::sin(imu_yaw_ - theta_), std::cos(imu_yaw_ - theta_));
+            theta_ += imu_trust_factor_ * yaw_error;
 
-        double v_x = d_center / dt;
-        double v_theta = d_theta / dt;
+            // -----------------------------------------------------
+            // 🌟 [각속도(v_theta) 상보 필터 적용 부분] 🌟
+            // -----------------------------------------------------
+            // 1. 엔코더 기반 순간 각속도 계산
+            double v_theta_enc = d_theta_wheel / dt; 
+            
+            // 2. 가중치 적용 (예: IMU 99.9% + 엔코더 0.1%)
+            v_theta = (imu_angular_z_ * (1.0 - enc_v_theta_weight_)) + (v_theta_enc * enc_v_theta_weight_);
+            
+        } else {
+            // IMU 미사용 시 순수 엔코더 사용
+            theta_ += d_theta_wheel;
+            v_theta = d_theta_wheel / dt;
+        }
 
         prev_left_tick_ = current_left_tick;
         prev_right_tick_ = current_right_tick;
@@ -127,8 +146,9 @@ private:
         odom_pub_->publish(odom);
     }
 
-    double cpr_, wheel_diameter_, track_width_, distance_per_tick_;
-    double x_, y_, theta_, imu_yaw_;
+    double cpr_, wheel_diameter_, track_width_, distance_per_tick_, imu_trust_factor_;
+    double enc_v_theta_weight_;
+    double x_, y_, theta_, imu_yaw_, imu_angular_z_;
     bool use_imu_;
     int prev_left_tick_, prev_right_tick_;
     rclcpp::Time last_time_;
