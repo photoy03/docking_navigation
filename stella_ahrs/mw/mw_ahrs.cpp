@@ -1,23 +1,21 @@
 #include "mw_ahrs.hpp"
 #include "mw_ahrsX1_def.hpp"
 
-static bool AHRS = false;
+#include <cmath>
 
 namespace ntrex
 {
   void MwAhrsRosDriver::StartReading()
   {
-    AHRS = true;
-    sleep(1);
+    running_.store(true);
+    std::this_thread::sleep_for(1s);
     reading_thread_ = std::thread(&MwAhrsRosDriver::MwAhrsRead, this);
   }
 
   void MwAhrsRosDriver::StopReading()
   {
-    if (AHRS)
+    if (running_.exchange(false))
     {
-      AHRS = false;
-      sleep(1);
       if (reading_thread_.joinable())
       {
         reading_thread_.join();
@@ -27,7 +25,8 @@ namespace ntrex
 
   void MwAhrsRosDriver::StartPubing()
   {
-    if (AHRS)
+    if (running_.load() &&
+        (publish_imu_data_ || publish_raw_ || publish_mag_ || publish_yaw_ || publish_tf_))
       publisher_thread_ = std::thread(&MwAhrsRosDriver::publish_topic, this);
   }
 
@@ -43,6 +42,11 @@ namespace ntrex
     imu_data_msg = sensor_msgs::msg::Imu();
     imu_magnetic_msg = sensor_msgs::msg::MagneticField();
     imu_yaw_msg = std_msgs::msg::Float64();
+
+    // Publish a valid neutral quaternion until the first orientation packet arrives.
+    imu_data_msg.orientation.w = 1.0;
+    // The raw message intentionally contains no orientation estimate.
+    imu_data_raw_msg.orientation_covariance[0] = -1.0;
 
     linear_acceleration_cov = linear_acceleration_stddev_ * linear_acceleration_stddev_;
     angular_velocity_cov = angular_velocity_stddev_ * angular_velocity_stddev_;
@@ -78,7 +82,7 @@ namespace ntrex
 
   void MwAhrsRosDriver::MwAhrsRead()
   {
-    while (AHRS)
+    while (running_.load())
     {
       unsigned char data[8];
 
@@ -91,12 +95,15 @@ namespace ntrex
           acc_value[1] = (int16_t)(((int)(unsigned char)data[4] | (int)(unsigned char)data[5] << 8)) / 1000.0;
           acc_value[2] = (int16_t)(((int)(unsigned char)data[6] | (int)(unsigned char)data[7] << 8)) / 1000.0;
 
-          imu_data_raw_msg.linear_acceleration.x = imu_data_msg.linear_acceleration.x =
-              acc_value[0] * convertor_g2a;
-          imu_data_raw_msg.linear_acceleration.y = imu_data_msg.linear_acceleration.y =
-              acc_value[1] * convertor_g2a;
-          imu_data_raw_msg.linear_acceleration.z = imu_data_msg.linear_acceleration.z =
-              acc_value[2] * convertor_g2a;
+          {
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            imu_data_raw_msg.linear_acceleration.x = imu_data_msg.linear_acceleration.x =
+                acc_value[0] * convertor_g2a;
+            imu_data_raw_msg.linear_acceleration.y = imu_data_msg.linear_acceleration.y =
+                acc_value[1] * convertor_g2a;
+            imu_data_raw_msg.linear_acceleration.z = imu_data_msg.linear_acceleration.z =
+                acc_value[2] * convertor_g2a;
+          }
 
           break;
 
@@ -105,12 +112,15 @@ namespace ntrex
           gyr_value[1] = (int16_t)(((int)(unsigned char)data[4] | (int)(unsigned char)data[5] << 8)) / 10.0;
           gyr_value[2] = (int16_t)(((int)(unsigned char)data[6] | (int)(unsigned char)data[7] << 8)) / 10.0;
 
-          imu_data_raw_msg.angular_velocity.x = imu_data_msg.angular_velocity.x =
-              gyr_value[0] * convertor_d2r;
-          imu_data_raw_msg.angular_velocity.y = imu_data_msg.angular_velocity.y =
-              gyr_value[1] * convertor_d2r;
-          imu_data_raw_msg.angular_velocity.z = imu_data_msg.angular_velocity.z =
-              gyr_value[2] * convertor_d2r;
+          {
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            imu_data_raw_msg.angular_velocity.x = imu_data_msg.angular_velocity.x =
+                gyr_value[0] * convertor_d2r;
+            imu_data_raw_msg.angular_velocity.y = imu_data_msg.angular_velocity.y =
+                gyr_value[1] * convertor_d2r;
+            imu_data_raw_msg.angular_velocity.z = imu_data_msg.angular_velocity.z =
+                gyr_value[2] * convertor_d2r;
+          }
 
           break;
 
@@ -125,12 +135,15 @@ namespace ntrex
 
           tf_orientation = Euler2Quaternion(roll, pitch, yaw);
 
-          imu_yaw_msg.data = deg_value[2];
+          {
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            imu_yaw_msg.data = deg_value[2];
 
-          imu_data_msg.orientation.x = tf_orientation.x();
-          imu_data_msg.orientation.y = tf_orientation.y();
-          imu_data_msg.orientation.z = tf_orientation.z();
-          imu_data_msg.orientation.w = tf_orientation.w();
+            imu_data_msg.orientation.x = tf_orientation.x();
+            imu_data_msg.orientation.y = tf_orientation.y();
+            imu_data_msg.orientation.z = tf_orientation.z();
+            imu_data_msg.orientation.w = tf_orientation.w();
+          }
 
           break;
 
@@ -139,9 +152,12 @@ namespace ntrex
           mag_value[1] = (int16_t)(((int)(unsigned char)data[4] | (int)(unsigned char)data[5] << 8)) / 10.0;
           mag_value[2] = (int16_t)(((int)(unsigned char)data[6] | (int)(unsigned char)data[7] << 8)) / 10.0;
 
-          imu_magnetic_msg.magnetic_field.x = mag_value[0] / convertor_ut2t;
-          imu_magnetic_msg.magnetic_field.y = mag_value[1] / convertor_ut2t;
-          imu_magnetic_msg.magnetic_field.z = mag_value[2] / convertor_ut2t;
+          {
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            imu_magnetic_msg.magnetic_field.x = mag_value[0] / convertor_ut2t;
+            imu_magnetic_msg.magnetic_field.y = mag_value[1] / convertor_ut2t;
+            imu_magnetic_msg.magnetic_field.z = mag_value[2] / convertor_ut2t;
+          }
 
           break;
         }
@@ -151,19 +167,51 @@ namespace ntrex
 
   void MwAhrsRosDriver::publish_topic()
   {
-    rclcpp::Rate rate(1000);
+    rclcpp::Rate rate(publish_rate_hz_);
 
-    while (rclcpp::ok() && AHRS)
+    while (rclcpp::ok() && running_.load())
     {
-      rclcpp::Time now = this->get_clock()->now();
+      const rclcpp::Time now = this->get_clock()->now();
+      sensor_msgs::msg::Imu imu_data_snapshot;
+      sensor_msgs::msg::Imu imu_raw_snapshot;
+      sensor_msgs::msg::MagneticField mag_snapshot;
+      std_msgs::msg::Float64 yaw_snapshot;
 
-      imu_data_raw_msg.header.stamp = imu_data_msg.header.stamp = imu_magnetic_msg.header.stamp = now;
-      imu_data_raw_msg.header.frame_id = imu_data_msg.header.frame_id = imu_magnetic_msg.header.frame_id = frame_id_;
+      {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        if (publish_imu_data_ || publish_tf_)
+          imu_data_snapshot = imu_data_msg;
+        if (publish_raw_)
+          imu_raw_snapshot = imu_data_raw_msg;
+        if (publish_mag_)
+          mag_snapshot = imu_magnetic_msg;
+        if (publish_yaw_)
+          yaw_snapshot = imu_yaw_msg;
+      }
 
-      imu_data_raw_pub_->publish(std::move(imu_data_raw_msg));
-      imu_data_pub_->publish(std::move(imu_data_msg));
-      imu_mag_pub_->publish(std::move(imu_magnetic_msg));
-      imu_yaw_pub_->publish(std::move(imu_yaw_msg));
+      if (publish_imu_data_)
+      {
+        imu_data_snapshot.header.stamp = now;
+        imu_data_snapshot.header.frame_id = frame_id_;
+        imu_data_pub_->publish(imu_data_snapshot);
+      }
+
+      if (publish_raw_)
+      {
+        imu_raw_snapshot.header.stamp = now;
+        imu_raw_snapshot.header.frame_id = frame_id_;
+        imu_data_raw_pub_->publish(imu_raw_snapshot);
+      }
+
+      if (publish_mag_)
+      {
+        mag_snapshot.header.stamp = now;
+        mag_snapshot.header.frame_id = frame_id_;
+        imu_mag_pub_->publish(mag_snapshot);
+      }
+
+      if (publish_yaw_)
+        imu_yaw_pub_->publish(yaw_snapshot);
 
       if (publish_tf_)
       {
@@ -174,7 +222,7 @@ namespace ntrex
         tf.transform.translation.x = 0.0;
         tf.transform.translation.y = 0.0;
         tf.transform.translation.z = 0.0;
-        tf.transform.rotation = imu_data_msg.orientation;
+        tf.transform.rotation = imu_data_snapshot.orientation;
 
         broadcaster_->sendTransform(tf);
       }
@@ -226,9 +274,41 @@ namespace ntrex
     return res;
   }
 
-  MwAhrsRosDriver::MwAhrsRosDriver(char *port, int baud_rate) : Node("MW_AHRS_ROS2")
+  MwAhrsRosDriver::MwAhrsRosDriver(char *port, int baud_rate) : Node("stella_ahrs_node")
   {
     bool res = false;
+
+    linear_acceleration_stddev_ = this->declare_parameter<double>("linear_acceleration_stddev", 0.0);
+    angular_velocity_stddev_ = this->declare_parameter<double>("angular_velocity_stddev", 0.0);
+    magnetic_field_stddev_ = this->declare_parameter<double>("magnetic_field_stddev", 0.0);
+    orientation_stddev_ = this->declare_parameter<double>("orientation_stddev", 0.0);
+    publish_rate_hz_ = this->declare_parameter<double>("publish_rate_hz", 100.0);
+    publish_imu_data_ = this->declare_parameter<bool>("publish_imu_data", true);
+    publish_raw_ = this->declare_parameter<bool>("publish_raw", false);
+    publish_mag_ = this->declare_parameter<bool>("publish_mag", false);
+    publish_yaw_ = this->declare_parameter<bool>("publish_yaw", false);
+    frame_id_ = this->declare_parameter<std::string>("frame_id", "imu_link");
+    publish_tf_ = this->declare_parameter<bool>("publish_tf", false);
+    parent_frame_id_ = this->declare_parameter<std::string>("parent_frame_id", "robot1_base");
+
+    if (!std::isfinite(publish_rate_hz_) || publish_rate_hz_ <= 0.0 || publish_rate_hz_ > 1000.0)
+    {
+      RCLCPP_WARN(this->get_logger(),
+                  "Invalid publish_rate_hz %.3f; using 100.0 Hz", publish_rate_hz_);
+      publish_rate_hz_ = 100.0;
+    }
+
+    if (frame_id_.empty())
+    {
+      RCLCPP_WARN(this->get_logger(), "Empty frame_id; using imu_link");
+      frame_id_ = "imu_link";
+    }
+
+    if (publish_tf_ && parent_frame_id_.empty())
+    {
+      RCLCPP_WARN(this->get_logger(), "Empty parent_frame_id; disabling IMU TF publication");
+      publish_tf_ = false;
+    }
 
     res = MW_AHRS_Connect(port, baud_rate);
 
@@ -241,29 +321,33 @@ namespace ntrex
       MW_AHRS_Setting();
       res = true;
       
-      this->declare_parameter("linear_acceleration_stddev", 0.0);
-      this->declare_parameter("angular_velocity_stddev", 0.0);
-      this->declare_parameter("magnetic_field_stddev", 0.0);
-      this->declare_parameter("orientation_stddev", 0.0);
-
-      this->get_parameter("linear_acceleration_stddev", linear_acceleration_stddev_);
-      this->get_parameter("angular_velocity_stddev", angular_velocity_stddev_);
-      this->get_parameter("magnetic_field_stddev", magnetic_field_stddev_);
-      this->get_parameter("orientation_stddev", orientation_stddev_);
-
       MW_AHRS_Covariance();
 
       StartReading();
 
       auto qos = rclcpp::QoS(rclcpp::KeepLast(10)) .reliable() .durability_volatile();
 
-      imu_data_raw_pub_ = this->create_publisher<sensor_msgs::msg::Imu>("imu/data_raw", qos);
-      imu_data_pub_ = this->create_publisher<sensor_msgs::msg::Imu>("imu/data", qos);
-      imu_mag_pub_ = this->create_publisher<sensor_msgs::msg::MagneticField>("imu/mag", qos);
-      imu_yaw_pub_ = this->create_publisher<std_msgs::msg::Float64>("imu/yaw", qos);
+      if (publish_raw_)
+        imu_data_raw_pub_ = this->create_publisher<sensor_msgs::msg::Imu>("imu/data_raw", qos);
+      if (publish_imu_data_)
+        imu_data_pub_ = this->create_publisher<sensor_msgs::msg::Imu>("imu/data", qos);
+      if (publish_mag_)
+        imu_mag_pub_ = this->create_publisher<sensor_msgs::msg::MagneticField>("imu/mag", qos);
+      if (publish_yaw_)
+        imu_yaw_pub_ = this->create_publisher<std_msgs::msg::Float64>("imu/yaw", qos);
+      if (publish_tf_)
+        broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
       StartPubing();
-      RCLCPP_INFO(this->get_logger(), "MW-AHRS ROS Init Success");
+      RCLCPP_INFO(this->get_logger(),
+                  "MW-AHRS ROS Init Success (rate=%.1f Hz, data=%s, raw=%s, mag=%s, yaw=%s, tf=%s, frame=%s)",
+                  publish_rate_hz_,
+                  publish_imu_data_ ? "on" : "off",
+                  publish_raw_ ? "on" : "off",
+                  publish_mag_ ? "on" : "off",
+                  publish_yaw_ ? "on" : "off",
+                  publish_tf_ ? "on" : "off",
+                  frame_id_.c_str());
     }
     else
     {

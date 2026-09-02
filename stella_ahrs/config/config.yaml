@@ -1,5 +1,13 @@
-mw_ahrs_ros2_driver:
+stella_ahrs_node:
   ros__parameters:
+    publish_rate_hz: 100.0
+    publish_imu_data: true
+    publish_raw: false
+    publish_mag: false
+    publish_yaw: false
+    frame_id: imu_link
+    publish_tf: false
+    parent_frame_id: robot1_base
     linear_acceleration_stddev: 0.02
     angular_velocity_stddev: 0.01
     magnetic_field_stddev: 0.00000327486

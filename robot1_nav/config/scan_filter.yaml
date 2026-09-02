@@ -1,0 +1,13 @@
+scan_to_scan_filter_chain:
+  ros__parameters:
+
+    filter1:
+      name: robot_body_filter
+      type: laser_filters/LaserScanPolygonFilter
+
+      params:
+        polygon_frame: robot1_base
+
+        polygon: '[[0.29, -0.65], [0.29, 0.65], [-0.95, 0.65], [-0.95, -0.65]]'
+
+        invert: false

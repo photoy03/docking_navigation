@@ -1,0 +1,714 @@
+#include <chrono>
+#include <memory>
+#include <string>
+#include <vector>
+#include <sstream>
+#include <cstring>
+#include <cstdio>
+
+#include "rclcpp/rclcpp.hpp"
+
+#include "geometry_msgs/msg/twist.hpp"
+
+#include "std_msgs/msg/int32.hpp"
+#include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/int32_multi_array.hpp"
+
+// CSerialPort
+#include "CSerialPort/SerialPort.h"
+
+using namespace std::chrono_literals;
+using namespace itas109;
+
+
+class MCUBridge : public rclcpp::Node
+{
+public:
+    MCUBridge()
+    : Node("mcu_bridge_node"),
+      read_buffer_(""),
+      mcu_state_(-1),
+      docked_(false),
+      emergency_(false)
+    {
+        // =====================================================
+        // Parameters
+        // =====================================================
+
+        this->declare_parameter<std::string>(
+            "port_name",
+            "/dev/arduino"
+        );
+
+        this->declare_parameter<int>(
+            "baud_rate",
+            115200
+        );
+
+        const std::string port_name =
+            this->get_parameter("port_name").as_string();
+
+        const int baud_rate =
+            this->get_parameter("baud_rate").as_int();
+
+
+        // =====================================================
+        // Serial
+        // =====================================================
+
+        sp_.init(
+            port_name.c_str(),
+            baud_rate,
+            ParityNone,
+            DataBits8,
+            StopOne
+        );
+
+        if (sp_.open()) {
+            RCLCPP_INFO(
+                this->get_logger(),
+                "MCU 시리얼 연결 성공: %s",
+                port_name.c_str()
+            );
+        }
+        else {
+            RCLCPP_ERROR(
+                this->get_logger(),
+                "시리얼 포트 열기 실패: %s",
+                port_name.c_str()
+            );
+        }
+
+
+        // =====================================================
+        // QoS
+        //
+        // MCU state들은 순간 데이터가 아니라 현재 상태이므로
+        // 마지막 값을 새 subscriber도 받을 수 있도록
+        // transient_local 사용
+        // =====================================================
+
+        auto state_qos =
+            rclcpp::QoS(
+                rclcpp::KeepLast(1)
+            )
+            .reliable()
+            .transient_local();
+
+
+        // =====================================================
+        // Publishers
+        // =====================================================
+
+        // 기존 encoder tick
+        tick_pub_ =
+            this->create_publisher<
+                std_msgs::msg::Int32MultiArray
+            >(
+                "/robot1/wheel_ticks",
+                10
+            );
+
+        // STM state
+        state_pub_ =
+            this->create_publisher<
+                std_msgs::msg::Int32
+            >(
+                "/mcu/state",
+                state_qos
+            );
+
+        // Dock 여부
+        docked_pub_ =
+            this->create_publisher<
+                std_msgs::msg::Bool
+            >(
+                "/mcu/docked",
+                state_qos
+            );
+
+        // Emergency 여부
+        emergency_pub_ =
+            this->create_publisher<
+                std_msgs::msg::Bool
+            >(
+                "/mcu/emergency",
+                state_qos
+            );
+
+
+        // =====================================================
+        // Subscriber
+        // =====================================================
+
+        cmd_sub_ =
+            this->create_subscription<
+                geometry_msgs::msg::Twist
+            >(
+                "/cmd_vel",
+                10,
+                std::bind(
+                    &MCUBridge::cmd_callback,
+                    this,
+                    std::placeholders::_1
+                )
+            );
+
+
+        // =====================================================
+        // Serial RX polling timer
+        // =====================================================
+
+        read_timer_ =
+            this->create_wall_timer(
+                10ms,
+                std::bind(
+                    &MCUBridge::read_serial_callback,
+                    this
+                )
+            );
+
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "MCU Bridge protocol 확장 버전 시작"
+        );
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "초기 MCU state = UNKNOWN"
+        );
+    }
+
+
+    ~MCUBridge()
+    {
+        if (sp_.isOpen()) {
+            sp_.close();
+        }
+    }
+
+
+private:
+
+    // =========================================================
+    // Utility
+    // =========================================================
+
+    std::vector<std::string> split_csv(
+        const std::string & line)
+    {
+        std::stringstream ss(line);
+
+        std::string token;
+        std::vector<std::string> tokens;
+
+        while (std::getline(ss, token, ',')) {
+            tokens.push_back(token);
+        }
+
+        return tokens;
+    }
+
+
+    // =========================================================
+    // Jetson -> STM
+    //
+    // /cmd_vel은 STM이 실제 STATE 2(AUTO)라고 보고한 경우에만
+    // V 명령으로 전달한다.
+    // =========================================================
+
+    void cmd_callback(
+        const geometry_msgs::msg::Twist::SharedPtr msg)
+    {
+        if (!sp_.isOpen()) {
+            return;
+        }
+
+        // Emergency 상태에서는 어떠한 velocity도 송신하지 않음
+        if (emergency_) {
+            return;
+        }
+
+        // STM이 실제 AUTO 상태라고 보고한 경우만 허용
+        if (mcu_state_ != 2) {
+            return;
+        }
+
+        char buffer[64];
+
+        std::snprintf(
+            buffer,
+            sizeof(buffer),
+            "V,%.2f,%.2f\n",
+            msg->linear.x,
+            msg->angular.z
+        );
+
+        sp_.writeData(
+            buffer,
+            std::strlen(buffer)
+        );
+    }
+
+
+    // =========================================================
+    // STM -> Jetson
+    // =========================================================
+
+    void read_serial_callback()
+    {
+        if (!sp_.isOpen()) {
+            return;
+        }
+
+        char temp_buf[256];
+
+        const int read_len =
+            sp_.readData(
+                temp_buf,
+                sizeof(temp_buf) - 1
+            );
+
+        if (read_len <= 0) {
+            return;
+        }
+
+        temp_buf[read_len] = '\0';
+
+        read_buffer_ += temp_buf;
+
+
+        // =====================================================
+        // '\n' 기준 packet 단위 처리
+        // =====================================================
+
+        size_t pos;
+
+        while (
+            (pos = read_buffer_.find('\n'))
+            != std::string::npos
+        )
+        {
+            std::string line =
+                read_buffer_.substr(
+                    0,
+                    pos
+                );
+
+            read_buffer_.erase(
+                0,
+                pos + 1
+            );
+
+
+            // Windows/CRLF 대응
+            if (
+                !line.empty() &&
+                line.back() == '\r'
+            )
+            {
+                line.pop_back();
+            }
+
+
+            if (line.empty()) {
+                continue;
+            }
+
+
+            parse_serial_line(line);
+        }
+    }
+
+
+    // =========================================================
+    // Packet parser
+    // =========================================================
+
+    void parse_serial_line(
+        const std::string & line)
+    {
+        const auto tokens =
+            split_csv(line);
+
+        if (tokens.empty()) {
+            return;
+        }
+
+
+        // =====================================================
+        // B,...
+        //
+        // B,READY
+        // B,TARE_OK
+        // =====================================================
+
+        if (tokens[0] == "B")
+        {
+            if (tokens.size() >= 2)
+            {
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "[MCU BOOT] %s",
+                    tokens[1].c_str()
+                );
+            }
+
+            return;
+        }
+
+
+        // =====================================================
+        // D,...
+        //
+        // D,1 = Dock complete
+        // =====================================================
+
+        if (tokens[0] == "D")
+        {
+            if (tokens.size() < 2) {
+                return;
+            }
+
+            try
+            {
+                const int value =
+                    std::stoi(tokens[1]);
+
+                docked_ =
+                    (value == 1);
+
+                std_msgs::msg::Bool msg;
+
+                msg.data = docked_;
+
+                docked_pub_->publish(msg);
+
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "[MCU DOCK] docked = %s",
+                    docked_
+                        ? "true"
+                        : "false"
+                );
+            }
+            catch (...)
+            {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "잘못된 Dock 패킷: %s",
+                    line.c_str()
+                );
+            }
+
+            return;
+        }
+
+
+        // =====================================================
+        // S,...
+        //
+        // S,0 = STOP
+        // S,1 = ADMITTANCE
+        // S,2 = AUTO
+        // =====================================================
+
+        if (tokens[0] == "S")
+        {
+            if (tokens.size() < 2) {
+                return;
+            }
+
+            try
+            {
+                const int state =
+                    std::stoi(tokens[1]);
+
+
+                if (
+                    state < 0 ||
+                    state > 2
+                )
+                {
+                    RCLCPP_WARN(
+                        this->get_logger(),
+                        "알 수 없는 MCU state: %d",
+                        state
+                    );
+
+                    return;
+                }
+
+
+                mcu_state_ = state;
+
+
+                std_msgs::msg::Int32 msg;
+
+                msg.data =
+                    mcu_state_;
+
+                state_pub_->publish(msg);
+
+
+                const char * state_name =
+                    "UNKNOWN";
+
+                if (state == 0) {
+                    state_name = "STOP";
+                }
+                else if (state == 1) {
+                    state_name = "ADMITTANCE";
+                }
+                else if (state == 2) {
+                    state_name = "AUTO";
+                }
+
+
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "[MCU STATE] %d (%s)",
+                    state,
+                    state_name
+                );
+            }
+            catch (...)
+            {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "잘못된 State 패킷: %s",
+                    line.c_str()
+                );
+            }
+
+            return;
+        }
+
+
+        // =====================================================
+        // T,...
+        //
+        // 기존 encoder packet
+        //
+        // T,left_total,right_total
+        // =====================================================
+
+        if (tokens[0] == "T")
+        {
+            if (tokens.size() < 3) {
+                return;
+            }
+
+            try
+            {
+                const int left_tick =
+                    std::stoi(tokens[1]);
+
+                const int right_tick =
+                    std::stoi(tokens[2]);
+
+
+                auto tick_msg =
+                    std_msgs::msg::Int32MultiArray();
+
+                tick_msg.data.push_back(
+                    left_tick
+                );
+
+                tick_msg.data.push_back(
+                    right_tick
+                );
+
+
+                tick_pub_->publish(
+                    tick_msg
+                );
+            }
+            catch (...)
+            {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "손상된 Tick 패킷: %s",
+                    line.c_str()
+                );
+            }
+
+            return;
+        }
+
+
+        // =====================================================
+        // E,...
+        //
+        // E,1,VISION_FALL
+        // E,1,HX_TIMEOUT
+        // E,1,LOAD_OVER_LIMIT
+        // E,1,HX_SATURATION
+        // =====================================================
+
+        if (tokens[0] == "E")
+        {
+            if (tokens.size() < 2) {
+                return;
+            }
+
+            try
+            {
+                const int value =
+                    std::stoi(tokens[1]);
+
+
+                if (value == 1)
+                {
+                    emergency_ = true;
+
+
+                    std_msgs::msg::Bool msg;
+
+                    msg.data = true;
+
+                    emergency_pub_->publish(
+                        msg
+                    );
+
+
+                    std::string reason =
+                        "UNKNOWN";
+
+                    if (tokens.size() >= 3)
+                    {
+                        reason =
+                            tokens[2];
+                    }
+
+
+                    RCLCPP_ERROR(
+                        this->get_logger(),
+                        "[MCU EMERGENCY] %s",
+                        reason.c_str()
+                    );
+                }
+            }
+            catch (...)
+            {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "잘못된 Emergency 패킷: %s",
+                    line.c_str()
+                );
+            }
+
+            return;
+        }
+
+
+        // =====================================================
+        // PONG
+        // =====================================================
+
+        if (line == "PONG")
+        {
+            RCLCPP_INFO(
+                this->get_logger(),
+                "[MCU] PONG 수신"
+            );
+
+            return;
+        }
+
+
+        // =====================================================
+        // Unknown packet
+        // =====================================================
+
+        RCLCPP_DEBUG(
+            this->get_logger(),
+            "알 수 없는 MCU packet: %s",
+            line.c_str()
+        );
+    }
+
+
+    // =========================================================
+    // Serial
+    // =========================================================
+
+    CSerialPort sp_;
+
+    std::string read_buffer_;
+
+
+    // =========================================================
+    // MCU mirrored state
+    //
+    // 실제 상태머신이 아니라
+    // STM이 보고한 상태를 Jetson이 기억하는 변수
+    // =========================================================
+
+    int mcu_state_;
+
+    bool docked_;
+
+    bool emergency_;
+
+
+    // =========================================================
+    // ROS Publishers
+    // =========================================================
+
+    rclcpp::Publisher<
+        std_msgs::msg::Int32MultiArray
+    >::SharedPtr tick_pub_;
+
+    rclcpp::Publisher<
+        std_msgs::msg::Int32
+    >::SharedPtr state_pub_;
+
+    rclcpp::Publisher<
+        std_msgs::msg::Bool
+    >::SharedPtr docked_pub_;
+
+    rclcpp::Publisher<
+        std_msgs::msg::Bool
+    >::SharedPtr emergency_pub_;
+
+
+    // =========================================================
+    // ROS Subscriber
+    // =========================================================
+
+    rclcpp::Subscription<
+        geometry_msgs::msg::Twist
+    >::SharedPtr cmd_sub_;
+
+
+    // =========================================================
+    // Timer
+    // =========================================================
+
+    rclcpp::TimerBase::SharedPtr
+        read_timer_;
+};
+
+
+int main(
+    int argc,
+    char * argv[])
+{
+    rclcpp::init(
+        argc,
+        argv
+    );
+
+    auto node =
+        std::make_shared<MCUBridge>();
+
+    rclcpp::spin(
+        node
+    );
+
+    rclcpp::shutdown();
+
+    return 0;
+}

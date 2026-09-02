@@ -16,12 +16,20 @@ class OdomPublisher : public rclcpp::Node
 {
 public:
     OdomPublisher()
-    : Node("robot1_odom_node"), x_(0.0), y_(0.0), theta_(0.0), imu_yaw_(0.0), imu_angular_z_(0.0), use_imu_(false),
-      prev_left_tick_(0), prev_right_tick_(0)
+    : Node("robot1_odom_node"),
+      x_(0.0),
+      y_(0.0),
+      theta_(0.0),
+      imu_yaw_(0.0),
+      imu_angular_z_(0.0),
+      use_imu_(false),
+      first_tick_received_(false),
+      prev_left_tick_(0),
+      prev_right_tick_(0)
     {
         this->declare_parameter<double>("cpr", 3588.0);
         this->declare_parameter<double>("wheel_diameter", 0.216);
-        this->declare_parameter<double>("track_width", 0.45);
+        this->declare_parameter<double>("track_width", 1.2405);
         this->declare_parameter<double>("imu_trust_factor", 0.1); // IMU 신뢰도 (0.0 ~ 1.0)
         this->declare_parameter<double>("enc_v_theta_weight", 0.001); // 엔코더 각속도 신뢰도 (0.001 = 0.1%)
 	enc_v_theta_weight_ = this->get_parameter("enc_v_theta_weight").as_double();
@@ -64,18 +72,73 @@ private:
         use_imu_ = true;
     }
 
-    void tick_callback(const std_msgs::msg::Int32MultiArray::SharedPtr msg)
+    void tick_callback(
+    const std_msgs::msg::Int32MultiArray::SharedPtr msg)
     {
-        rclcpp::Time current_time = this->now();
-        double dt = (current_time - last_time_).seconds();
+        // 잘못된 tick packet 방어
+        if (msg->data.size() < 2) {
+            RCLCPP_WARN(
+                this->get_logger(),
+                "wheel_ticks 데이터 길이가 부족합니다."
+            );
+            return;
+        }
 
-        if (dt <= 0.0) return;
+        rclcpp::Time current_time = this->now();
 
         int current_left_tick = msg->data[0];
         int current_right_tick = msg->data[1];
 
-        double delta_left = (current_left_tick - prev_left_tick_) * distance_per_tick_;
-        double delta_right = (current_right_tick - prev_right_tick_) * distance_per_tick_;
+
+    // =====================================================
+    // 첫 Tick은 기준점으로만 사용
+    //
+    // STM의 도킹 시 Encoder_ResetTotals()와 별개로
+    // Jetson에서도 첫 수신값을 previous 값으로 잡는다.
+    // =====================================================
+
+        if (!first_tick_received_)
+        {
+            prev_left_tick_ = current_left_tick;
+            prev_right_tick_ = current_right_tick;
+
+            last_time_ = current_time;
+            first_tick_received_ = true;
+
+            RCLCPP_INFO(
+                this->get_logger(),
+                "첫 Encoder 기준값 설정: L=%d, R=%d",
+                current_left_tick,
+                current_right_tick
+            );
+
+        // 위치는 아직 움직이지 않았으므로
+        // 0속도의 odom/TF를 한번 publish해도 됨
+            publish_odom_and_tf(
+               current_time,
+               0.0,
+               0.0
+            );
+
+           return;
+        }
+
+
+        double dt =
+            (current_time - last_time_).seconds();
+
+        if (dt <= 0.0) {
+            return;
+        }
+
+
+        double delta_left =
+            (current_left_tick - prev_left_tick_)
+            * distance_per_tick_;
+
+        double delta_right =
+            (current_right_tick - prev_right_tick_)
+            * distance_per_tick_;
 
         double d_center = (delta_right + delta_left) / 2.0;
         double d_theta_wheel = (delta_right - delta_left) / track_width_;
@@ -150,6 +213,7 @@ private:
     double enc_v_theta_weight_;
     double x_, y_, theta_, imu_yaw_, imu_angular_z_;
     bool use_imu_;
+    bool first_tick_received_;
     int prev_left_tick_, prev_right_tick_;
     rclcpp::Time last_time_;
 

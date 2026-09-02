@@ -1,3 +1,6 @@
+#pragma once
+
+#include <atomic>
 #include <rclcpp/logging.hpp>
 #include <sensor_msgs/msg/magnetic_field.hpp>
 #include <std_msgs/msg/float64.hpp>
@@ -46,7 +49,7 @@ namespace ntrex
 {
     class MwAhrsRosDriver : public rclcpp::Node
     {
-    public:
+    private:
         sensor_msgs::msg::Imu imu_data_raw_msg;
         sensor_msgs::msg::Imu imu_data_msg;
         sensor_msgs::msg::MagneticField imu_magnetic_msg;
@@ -54,16 +57,22 @@ namespace ntrex
 
         tf2::Quaternion tf_orientation;
 
-    public:
-        double linear_acceleration_stddev_, angular_velocity_stddev_, magnetic_field_stddev_, orientation_stddev_;
-        double linear_acceleration_cov, angular_velocity_cov, magnetic_field_cov, orientation_cov;
-        double roll, pitch, yaw;
+        double linear_acceleration_stddev_{0.0}, angular_velocity_stddev_{0.0};
+        double magnetic_field_stddev_{0.0}, orientation_stddev_{0.0};
+        double linear_acceleration_cov{0.0}, angular_velocity_cov{0.0};
+        double magnetic_field_cov{0.0}, orientation_cov{0.0};
+        double roll{0.0}, pitch{0.0}, yaw{0.0};
 
-    private:
-        bool publish_tf_;
-        std::string parent_frame_id_;
-        std::string frame_id_;
-        std::mutex _lockAHRS;
+        double publish_rate_hz_{100.0};
+        bool publish_imu_data_{true};
+        bool publish_raw_{false};
+        bool publish_mag_{false};
+        bool publish_yaw_{false};
+        bool publish_tf_{false};
+        std::string parent_frame_id_{"robot1_base"};
+        std::string frame_id_{"imu_link"};
+        std::atomic_bool running_{false};
+        std::mutex data_mutex_;
 
     public:
         MwAhrsRosDriver(char *port, int baud_rate);
