@@ -1,0 +1,169 @@
+slam_toolbox:
+  ros__parameters:
+
+    # ======================================================
+    # Solver
+    # ======================================================
+
+    solver_plugin: solver_plugins::CeresSolver
+
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+
+    # Odom이 크게 나쁘지 않다고 했으니 일단 None
+    ceres_loss_function: None
+
+
+    # ======================================================
+    # Frame / Topic
+    # ======================================================
+
+    odom_frame: robot1_odom
+    map_frame: map
+    base_frame: robot1_base
+
+    # ★ 실제 Navigation/AMCL에서도 사용할 현재 필터 scan으로 맵 생성
+    scan_topic: /scan_filtered
+
+    mode: mapping
+    use_map_saver: true
+
+
+    # ======================================================
+    # 기본 처리
+    # ======================================================
+
+    debug_logging: false
+
+    # async에서는 scan을 밀어두지 않도록 1
+    scan_queue_size: 1
+
+    throttle_scans: 1
+
+    # map -> odom TF 50 Hz
+    transform_publish_period: 0.02
+
+    # RViz OccupancyGrid 갱신
+    map_update_interval: 1.0
+
+    resolution: 0.05
+
+    restamp_tf: false
+
+    # A2M12 기준
+    min_laser_range: 0.20
+    max_laser_range: 16.0
+
+    transform_timeout: 0.20
+
+    tf_buffer_duration: 30.0
+
+    stack_size_to_use: 40000000
+
+    enable_interactive_mode: true
+
+
+    # ======================================================
+    # ★ Scan Matching
+    # ======================================================
+
+    use_scan_matching: true
+    use_scan_barycenter: true
+
+    # 기존 공식 기본값 0.5m / 0.5rad 보다
+    # 저속 실차에 맞게 훨씬 자주 scan node 생성
+    minimum_travel_distance: 0.05
+    minimum_travel_heading: 0.05
+
+    check_min_dist_and_heading_precisely: true
+
+
+    # ======================================================
+    # Scan Buffer
+    # ======================================================
+
+    scan_buffer_size: 20
+
+    scan_buffer_maximum_scan_distance: 10.0
+
+
+    # ======================================================
+    # Scan-to-Scan Link Matching
+    # ======================================================
+
+    link_match_minimum_response_fine: 0.10
+
+    link_scan_maximum_distance: 1.5
+
+
+    # ======================================================
+    # ★ Loop Closure
+    # ======================================================
+
+    do_loop_closing: true
+
+    # 같은 구역을 다시 지날 때 후보 탐색 거리
+    loop_search_maximum_distance: 4.0
+
+    # 루프 후보가 어느 정도 연속적으로 존재해야 인정할지
+    loop_match_minimum_chain_size: 10
+
+    loop_match_maximum_variance_coarse: 3.0
+
+    loop_match_minimum_response_coarse: 0.35
+
+    loop_match_minimum_response_fine: 0.45
+
+
+    # ======================================================
+    # 일반 Scan Correlation
+    # ======================================================
+
+    correlation_search_space_dimension: 0.5
+
+    correlation_search_space_resolution: 0.01
+
+    correlation_search_space_smear_deviation: 0.1
+
+
+    # ======================================================
+    # Loop Closure Search Space
+    # ======================================================
+
+    loop_search_space_dimension: 8.0
+
+    loop_search_space_resolution: 0.05
+
+    loop_search_space_smear_deviation: 0.03
+
+
+    # ======================================================
+    # Scan Matcher
+    # ======================================================
+
+    distance_variance_penalty: 0.5
+
+    angle_variance_penalty: 1.0
+
+    fine_search_angle_offset: 0.00349
+
+    coarse_search_angle_offset: 0.349
+
+    coarse_angle_resolution: 0.0349
+
+    minimum_angle_penalty: 0.9
+
+    minimum_distance_penalty: 0.5
+
+    use_response_expansion: true
+
+
+    # ======================================================
+    # Occupancy Map
+    # ======================================================
+
+    min_pass_through: 2
+
+    occupancy_threshold: 0.1
