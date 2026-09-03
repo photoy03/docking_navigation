@@ -484,13 +484,20 @@ local["robot_base_frame"] = "robot1_base"
 local["resolution"] = 0.05
 
 local["rolling_window"] = True
-local_scan["observation_persistence"] = 0.0
+
 local["width"] = 3
 local["height"] = 3
 
 local["update_frequency"] = 5.0
 local["publish_frequency"] = 2.0
 
+# ----------------------------------------------------------
+# CPU / DDS optimization
+# ----------------------------------------------------------
+
+local["voxel_layer"]["publish_voxel_map"] = False
+
+local["always_send_full_costmap"] = False
 
 # ----------------------------------------------------------
 # TF
@@ -498,6 +505,7 @@ local["publish_frequency"] = 2.0
 # Nav2 Costmap 기본값도 0.3이지만
 # baseline 명확화를 위해 명시
 # ----------------------------------------------------------
+local["voxel_layer"]["scan"]["observation_persistence"] = 0.0
 
 local["transform_tolerance"] = 0.30
 
@@ -589,13 +597,19 @@ global_costmap["resolution"] = 0.05
 global_costmap["update_frequency"] = 1.0
 global_costmap["publish_frequency"] = 1.0
 
+# ----------------------------------------------------------
+# CPU / DDS optimization
+# ----------------------------------------------------------
+
+global_costmap["always_send_full_costmap"] = False
+
 global_costmap["track_unknown_space"] = True
-global_scan["observation_persistence"] = 0.0
+
 
 # ----------------------------------------------------------
 # TF
 # ----------------------------------------------------------
-
+global_costmap["obstacle_layer"]["scan"]["observation_persistence"] = 0.0
 global_costmap[
     "transform_tolerance"
 ] = 0.30

@@ -22,7 +22,9 @@ public:
       docked_(false),
       emergency_(false),
       has_pending_goal_(false),
-      phase_(Phase::IDLE)
+      phase_(Phase::IDLE),
+      admittance_retry_count_(0),
+      admittance_retry_exhausted_(false)
     {
         // =====================================================
         // State QoS
@@ -271,6 +273,18 @@ private:
 
             return;
         }
+        
+        // -----------------------------------------------------
+// MCU STOP 상태에서는 목적지 금지
+// -----------------------------------------------------
+if (mcu_state_ == 0)
+{
+    RCLCPP_ERROR(
+        this->get_logger(),
+        "목적지 거부: MCU STATE0 STOP"
+    );
+    return;
+}
 
 
         // -----------------------------------------------------
@@ -395,6 +409,61 @@ private:
                 mcu_state_
             );
         }
+        
+        
+        // =====================================================
+// Unexpected MCU STOP
+//
+// Navigation 또는 AUTO 전환 중 STM이 STATE0가 되면
+// 현재 Nav Goal / pending goal을 즉시 폐기한다.
+//
+// 중요:
+// phase를 먼저 NAVIGATING에서 벗어나게 해야
+// Nav cancel result로 /nav/finished가 돌아와도
+// nav_finished_callback()이 M1을 다시 보내지 않는다.
+// =====================================================
+if (
+    mcu_state_ == 0 &&
+    (
+        phase_ == Phase::NAVIGATING ||
+        phase_ == Phase::WAIT_AUTO
+    )
+)
+{
+    const bool nav_was_active =
+        (phase_ == Phase::NAVIGATING);
+
+    RCLCPP_ERROR(
+        this->get_logger(),
+        "MCU STATE0 감지 - AUTO/Navigation 중단"
+    );
+
+    // pending destination 폐기
+    has_pending_goal_ = false;
+
+    // cancel 결과 callback보다 먼저 phase를 변경해야 함
+    phase_ = Phase::IDLE;
+
+    // 실제 Nav2 goal이 전달된 경우에만 cancel
+    if (nav_was_active)
+    {
+        request_nav_cancel();
+
+        RCLCPP_ERROR(
+            this->get_logger(),
+            "Navigation 중 MCU STATE0 -> Nav Goal 즉시 Cancel"
+        );
+    }
+    else
+    {
+        RCLCPP_ERROR(
+            this->get_logger(),
+            "AUTO 전환 중 MCU STATE0 -> Pending Goal 폐기"
+        );
+    }
+
+    return;
+}
 
 
         // =====================================================
@@ -488,6 +557,13 @@ private:
         {
             phase_ =
                 Phase::IDLE;
+                
+                
+            admittance_retry_count_ =
+    		0;
+
+	    admittance_retry_exhausted_ =
+    		false;
 
 
             RCLCPP_INFO(
@@ -538,130 +614,138 @@ private:
     }
 
 
-    // =========================================================
-    // Emergency
-    // =========================================================
+// =========================================================
+// Emergency
+// =========================================================
 
-    void emergency_callback(
-        const std_msgs::msg::Bool::SharedPtr msg
+void emergency_callback(
+    const std_msgs::msg::Bool::SharedPtr msg
+)
+{
+    const bool previous_emergency =
+        emergency_;
+
+    emergency_ =
+        msg->data;
+
+
+    // =====================================================
+    // Emergency SET
+    // =====================================================
+
+    if (
+        emergency_ &&
+        !previous_emergency
     )
     {
-        const bool previous_emergency =
-            emergency_;
+        RCLCPP_ERROR(
+            this->get_logger(),
+            "========================================"
+        );
+
+        RCLCPP_ERROR(
+            this->get_logger(),
+            "MCU EMERGENCY 감지"
+        );
+
+        RCLCPP_ERROR(
+            this->get_logger(),
+            "========================================"
+        );
 
 
-        emergency_ =
-            msg->data;
+        const bool nav_was_active =
+            (
+                phase_ == Phase::NAVIGATING ||
+                phase_ == Phase::WAIT_AUTO
+            );
 
 
-        // =====================================================
-        // Emergency SET
-        // =====================================================
+        // -------------------------------------------------
+        // Pending goal 폐기
+        // -------------------------------------------------
+
+        has_pending_goal_ =
+            false;
+
+
+        // -------------------------------------------------
+        // 반드시 Nav cancel보다 먼저
+        // EMERGENCY phase 확정
+        //
+        // 이후 cancel 결과로 /nav/finished가 들어와도
+        // M1을 보내지 않게 함.
+        // -------------------------------------------------
+
+        phase_ =
+            Phase::EMERGENCY;
+
+
+        // -------------------------------------------------
+        // Navigation 또는 AUTO 전환 중이었다면
+        // 현재 Nav Goal 취소
+        // -------------------------------------------------
+
+        if (nav_was_active)
+        {
+            request_nav_cancel();
+        }
+
+
+        return;
+    }
+
+
+    // =====================================================
+    // Emergency CLEAR
+    //
+    // STM:
+    // E,0
+    //
+    // 아직 S,1이 안 왔을 수도 있으므로
+    // STATE1까지 확인해야 Recovery 완료.
+    // =====================================================
+
+    if (
+        !emergency_ &&
+        previous_emergency
+    )
+    {
+        RCLCPP_INFO(
+            this->get_logger(),
+            "MCU E,0 - Emergency clear 확인"
+        );
+
 
         if (
-            emergency_ &&
-            !previous_emergency
+            phase_ == Phase::EMERGENCY &&
+            mcu_state_ == 1
         )
         {
-            RCLCPP_ERROR(
-                this->get_logger(),
-                "========================================"
-            );
+            phase_ =
+                Phase::IDLE;
 
-            RCLCPP_ERROR(
-                this->get_logger(),
-                "MCU EMERGENCY 감지"
-            );
-
-            RCLCPP_ERROR(
-                this->get_logger(),
-                "========================================"
-            );
-
-
-            // 더 이상 pending goal 사용 금지
             has_pending_goal_ =
                 false;
 
 
-            // -------------------------------------------------
-            // 현재 Navigation 실행 중이거나
-            // Goal 전환 과정이었다면 Nav2 Goal cancel.
-            //
-            // cancel topic을 보내도 active goal이 없다면
-            // nav_goal_client에서 무시하므로 안전.
-            // -------------------------------------------------
-
-            if (
-                phase_ == Phase::NAVIGATING ||
-                phase_ == Phase::WAIT_AUTO
-            )
-            {
-                request_nav_cancel();
-            }
-
-
-            // 반드시 nav_finished가 돌아오기 전에
-            // EMERGENCY phase로 변경
-            //
-            // 따라서 cancel result의 /nav/finished를 받아도
-            // M1을 보내지 않음.
-            phase_ =
-                Phase::EMERGENCY;
-
-
-            return;
+            RCLCPP_INFO(
+                this->get_logger(),
+                "S,1도 이미 확인됨 - Recovery 완료"
+            );
         }
-
-
-        // =====================================================
-        // Emergency CLEAR
-        //
-        // STM Loadcell recovery가 E,0을 보낸 상태.
-        //
-        // 아직 STATE1 확정 전일 수 있으므로
-        // 바로 IDLE로 바꾸지 않는다.
-        // =====================================================
-
-        if (
-            !emergency_ &&
-            previous_emergency
-        )
+        else
         {
             RCLCPP_INFO(
                 this->get_logger(),
-                "MCU E,0 - Emergency clear 확인"
+                "STM S,1 대기"
             );
-
-
-            if (
-                phase_ == Phase::EMERGENCY &&
-                mcu_state_ == 1
-            )
-            {
-                phase_ =
-                    Phase::IDLE;
-
-
-                RCLCPP_INFO(
-                    this->get_logger(),
-                    "S,1도 이미 확인됨 - Recovery 완료"
-                );
-            }
-            else
-            {
-                RCLCPP_INFO(
-                    this->get_logger(),
-                    "STM S,1 대기"
-                );
-            }
-
-
-            return;
         }
+
+
+        return;
     }
-
-
+}
     // =========================================================
     // Nav Goal publish
     // =========================================================
@@ -843,16 +927,20 @@ private:
         // -----------------------------------------------------
 
         request_mode(
-            1
-        );
+    1
+);
 
+phase_ =
+    Phase::WAIT_ADMITTANCE;
 
-        phase_ =
-            Phase::WAIT_ADMITTANCE;
+admittance_retry_count_ =
+    0;
 
+admittance_retry_exhausted_ =
+    false;
 
-        mode_request_time_ =
-            this->now();
+mode_request_time_ =
+    this->now();
 
 
         RCLCPP_INFO(
@@ -898,22 +986,19 @@ private:
     // =========================================================
 
     void timer_callback()
+{
+    if (emergency_)
     {
-        if (
-            phase_ !=
-            Phase::WAIT_AUTO
-        )
-        {
-            return;
-        }
+        return;
+    }
 
 
-        if (emergency_)
-        {
-            return;
-        }
+    // =====================================================
+    // WAIT_AUTO
+    // =====================================================
 
-
+    if (phase_ == Phase::WAIT_AUTO)
+    {
         const double elapsed =
             (
                 this->now() -
@@ -929,7 +1014,7 @@ private:
 
         RCLCPP_ERROR(
             this->get_logger(),
-            "MCU AUTO 전환 Timeout - Nav Goal 취소"
+            "MCU AUTO 전환 Timeout - Pending Nav Goal 취소"
         );
 
 
@@ -946,9 +1031,115 @@ private:
             Phase::WAIT_ADMITTANCE;
 
 
+        admittance_retry_count_ =
+            0;
+
+        admittance_retry_exhausted_ =
+            false;
+
+
         mode_request_time_ =
             this->now();
+
+
+        return;
     }
+
+
+    // =====================================================
+    // WAIT_ADMITTANCE
+    //
+    // M1 -> S1 timeout / retry
+    // =====================================================
+
+    if (phase_ == Phase::WAIT_ADMITTANCE)
+    {
+        if (admittance_retry_exhausted_)
+        {
+            return;
+        }
+
+
+        const double elapsed =
+            (
+                this->now() -
+                mode_request_time_
+            ).seconds();
+
+
+        if (elapsed < 1.0)
+        {
+            return;
+        }
+
+
+        constexpr int MAX_ADMITTANCE_RETRIES =
+            3;
+
+
+        if (
+            admittance_retry_count_ >=
+            MAX_ADMITTANCE_RETRIES
+        )
+        {
+            admittance_retry_exhausted_ =
+                true;
+
+
+            RCLCPP_ERROR(
+                this->get_logger(),
+                "========================================"
+            );
+
+            RCLCPP_ERROR(
+                this->get_logger(),
+                "MCU ADMITTANCE 전환 실패"
+            );
+
+            RCLCPP_ERROR(
+                this->get_logger(),
+                "M1 retry %d회 후에도 S1 없음",
+                MAX_ADMITTANCE_RETRIES
+            );
+
+            RCLCPP_ERROR(
+                this->get_logger(),
+                "WAIT_ADMITTANCE 유지 - 새 목적지 차단"
+            );
+
+            RCLCPP_ERROR(
+                this->get_logger(),
+                "========================================"
+            );
+
+
+            return;
+        }
+
+
+        ++admittance_retry_count_;
+
+
+        RCLCPP_WARN(
+            this->get_logger(),
+            "MCU S1 Timeout - M1 재전송 (%d/%d)",
+            admittance_retry_count_,
+            MAX_ADMITTANCE_RETRIES
+        );
+
+
+        request_mode(
+            1
+        );
+
+
+        mode_request_time_ =
+            this->now();
+
+
+        return;
+    }
+}
 
 
     // =========================================================
@@ -1010,6 +1201,10 @@ private:
     bool emergency_;
 
     bool has_pending_goal_;
+    
+    int admittance_retry_count_;
+
+    bool admittance_retry_exhausted_;
 
 
     geometry_msgs::msg::PoseStamped

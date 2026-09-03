@@ -17,9 +17,24 @@
 using namespace std::chrono_literals;
 
 
+// =============================================================
+// Localization Ready Gate
+//
+// Navigation lifecycle은 다음 조건이 모두 만족될 때만 STARTUP:
+//
+// 1. /scan_filtered 최근 수신
+// 2. /robot1/odom 최근 수신
+// 3. /amcl_pose 최근 수신
+// 4. map -> robot1_odom TF 존재
+//
+// 단순히 "한 번 받은 적 있음"이 아니라
+// 실제 최근 데이터가 살아있는지 확인한다.
+// =============================================================
+
 class LocalizationReadyGate : public rclcpp::Node
 {
 public:
+
     LocalizationReadyGate()
     : Node("localization_ready_gate"),
       scan_received_(false),
@@ -29,16 +44,67 @@ public:
       navigation_started_(false)
     {
         // =====================================================
+        // Parameters
+        // =====================================================
+
+        // RPLIDAR A2M12 약 10 Hz 기준.
+        // 0.5초 동안 scan이 없다면 startup 허용하지 않음.
+        this->declare_parameter<double>(
+            "scan_timeout_sec",
+            0.5
+        );
+
+
+        // wheel tick / odom은 훨씬 빠르므로
+        // 0.5초면 충분히 여유 있는 값.
+        this->declare_parameter<double>(
+            "odom_timeout_sec",
+            0.5
+        );
+
+
+        // AMCL pose는 scan/odom보다 느릴 수 있으므로
+        // 너무 빡빡하게 잡지 않음.
+        this->declare_parameter<double>(
+            "amcl_pose_timeout_sec",
+            2.0
+        );
+
+
+        scan_timeout_sec_ =
+            this->get_parameter(
+                "scan_timeout_sec"
+            ).as_double();
+
+
+        odom_timeout_sec_ =
+            this->get_parameter(
+                "odom_timeout_sec"
+            ).as_double();
+
+
+        amcl_pose_timeout_sec_ =
+            this->get_parameter(
+                "amcl_pose_timeout_sec"
+            ).as_double();
+
+
+        // =====================================================
         // TF
         // =====================================================
 
         tf_buffer_ =
-            std::make_unique<tf2_ros::Buffer>(
+            std::make_unique<
+                tf2_ros::Buffer
+            >(
                 this->get_clock()
             );
 
+
         tf_listener_ =
-            std::make_shared<tf2_ros::TransformListener>(
+            std::make_shared<
+                tf2_ros::TransformListener
+            >(
                 *tf_buffer_
             );
 
@@ -48,12 +114,22 @@ public:
         // =====================================================
 
         scan_sub_ =
-            this->create_subscription<sensor_msgs::msg::LaserScan>(
+            this->create_subscription<
+                sensor_msgs::msg::LaserScan
+            >(
                 "/scan_filtered",
                 rclcpp::SensorDataQoS(),
-                [this](sensor_msgs::msg::LaserScan::SharedPtr)
+
+                [this](
+                    sensor_msgs::msg::LaserScan::SharedPtr
+                )
                 {
-                    scan_received_ = true;
+                    scan_received_ =
+                        true;
+
+
+                    last_scan_time_ =
+                        std::chrono::steady_clock::now();
                 }
             );
 
@@ -63,12 +139,22 @@ public:
         // =====================================================
 
         odom_sub_ =
-            this->create_subscription<nav_msgs::msg::Odometry>(
+            this->create_subscription<
+                nav_msgs::msg::Odometry
+            >(
                 "/robot1/odom",
                 rclcpp::SensorDataQoS(),
-                [this](nav_msgs::msg::Odometry::SharedPtr)
+
+                [this](
+                    nav_msgs::msg::Odometry::SharedPtr
+                )
                 {
-                    odom_received_ = true;
+                    odom_received_ =
+                        true;
+
+
+                    last_odom_time_ =
+                        std::chrono::steady_clock::now();
                 }
             );
 
@@ -83,10 +169,17 @@ public:
             >(
                 "/amcl_pose",
                 10,
+
                 [this](
-                    geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr)
+                    geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr
+                )
                 {
-                    amcl_pose_received_ = true;
+                    amcl_pose_received_ =
+                        true;
+
+
+                    last_amcl_pose_time_ =
+                        std::chrono::steady_clock::now();
                 }
             );
 
@@ -110,6 +203,7 @@ public:
         check_timer_ =
             this->create_wall_timer(
                 500ms,
+
                 std::bind(
                     &LocalizationReadyGate::check_ready,
                     this
@@ -117,53 +211,220 @@ public:
             );
 
 
+        // =====================================================
+        // Start log
+        // =====================================================
+
         RCLCPP_INFO(
             this->get_logger(),
-            "Localization Ready Gate 시작"
+            "========================================"
+        );
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Localization Ready Gate START"
+        );
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Freshness check 활성화"
+        );
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "scan timeout = %.2fs",
+            scan_timeout_sec_
+        );
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "odom timeout = %.2fs",
+            odom_timeout_sec_
+        );
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "AMCL pose timeout = %.2fs",
+            amcl_pose_timeout_sec_
         );
 
         RCLCPP_INFO(
             this->get_logger(),
             "scan / odom / amcl_pose / map->robot1_odom 대기 중"
         );
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "========================================"
+        );
     }
 
 
 private:
 
+    // =========================================================
+    // Ready Check
+    // =========================================================
+
     void check_ready()
     {
-        if (navigation_started_) {
+        // -----------------------------------------------------
+        // 이미 Navigation STARTUP 완료
+        // -----------------------------------------------------
+
+        if (navigation_started_)
+        {
             return;
         }
 
-        if (request_in_flight_) {
+
+        // -----------------------------------------------------
+        // Lifecycle request 처리 중
+        // -----------------------------------------------------
+
+        if (request_in_flight_)
+        {
+            return;
+        }
+
+
+        const auto now =
+            std::chrono::steady_clock::now();
+
+
+        // =====================================================
+        // Scan
+        // =====================================================
+
+        if (!scan_received_)
+        {
+            RCLCPP_INFO_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                2000,
+                "Navigation 대기: /scan_filtered 미수신"
+            );
+
+            return;
+        }
+
+
+        const double scan_age =
+            std::chrono::duration<double>(
+                now -
+                last_scan_time_
+            ).count();
+
+
+        if (
+            scan_age >
+            scan_timeout_sec_
+        )
+        {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                2000,
+                "Navigation 대기: /scan_filtered stale (age=%.3fs)",
+                scan_age
+            );
+
             return;
         }
 
 
         // =====================================================
-        // Sensor / localization topics
+        // Odom
         // =====================================================
 
-        if (!scan_received_) {
+        if (!odom_received_)
+        {
+            RCLCPP_INFO_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                2000,
+                "Navigation 대기: /robot1/odom 미수신"
+            );
+
             return;
         }
 
-        if (!odom_received_) {
+
+        const double odom_age =
+            std::chrono::duration<double>(
+                now -
+                last_odom_time_
+            ).count();
+
+
+        if (
+            odom_age >
+            odom_timeout_sec_
+        )
+        {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                2000,
+                "Navigation 대기: /robot1/odom stale (age=%.3fs)",
+                odom_age
+            );
+
             return;
         }
 
-        if (!amcl_pose_received_) {
+
+        // =====================================================
+        // AMCL Pose
+        // =====================================================
+
+        if (!amcl_pose_received_)
+        {
+            RCLCPP_INFO_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                2000,
+                "Navigation 대기: /amcl_pose 미수신"
+            );
+
+            return;
+        }
+
+
+        const double amcl_pose_age =
+            std::chrono::duration<double>(
+                now -
+                last_amcl_pose_time_
+            ).count();
+
+
+        if (
+            amcl_pose_age >
+            amcl_pose_timeout_sec_
+        )
+        {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                2000,
+                "Navigation 대기: /amcl_pose stale (age=%.3fs)",
+                amcl_pose_age
+            );
+
             return;
         }
 
 
         // =====================================================
         // map -> robot1_odom TF
+        //
+        // AMCL pose 자체의 freshness를 위에서 확인했으므로
+        // 여기서는 실제 TF chain 존재 여부를 검사.
         // =====================================================
 
-        bool tf_ready = false;
+        bool tf_ready =
+            false;
+
 
         try
         {
@@ -174,22 +435,36 @@ private:
                     tf2::TimePointZero
                 );
         }
-        catch (const tf2::TransformException &)
+        catch (
+            const tf2::TransformException &
+        )
         {
-            tf_ready = false;
+            tf_ready =
+                false;
         }
 
 
-        if (!tf_ready) {
+        if (!tf_ready)
+        {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                2000,
+                "Navigation 대기: map -> robot1_odom TF 없음"
+            );
+
             return;
         }
 
 
         // =====================================================
-        // Navigation lifecycle service
+        // Navigation Lifecycle Service
         // =====================================================
 
-        if (!navigation_lifecycle_client_->service_is_ready())
+        if (
+            !navigation_lifecycle_client_->
+                service_is_ready()
+        )
         {
             RCLCPP_INFO_THROTTLE(
                 this->get_logger(),
@@ -202,6 +477,10 @@ private:
         }
 
 
+        // =====================================================
+        // READY
+        // =====================================================
+
         RCLCPP_INFO(
             this->get_logger(),
             "========================================"
@@ -209,22 +488,25 @@ private:
 
         RCLCPP_INFO(
             this->get_logger(),
-            "Localization Ready"
+            "Localization READY"
         );
 
         RCLCPP_INFO(
             this->get_logger(),
-            "/scan_filtered        : OK"
+            "/scan_filtered : OK (age=%.3fs)",
+            scan_age
         );
 
         RCLCPP_INFO(
             this->get_logger(),
-            "/robot1/odom          : OK"
+            "/robot1/odom : OK (age=%.3fs)",
+            odom_age
         );
 
         RCLCPP_INFO(
             this->get_logger(),
-            "/amcl_pose            : OK"
+            "/amcl_pose : OK (age=%.3fs)",
+            amcl_pose_age
         );
 
         RCLCPP_INFO(
@@ -242,6 +524,10 @@ private:
     }
 
 
+    // =========================================================
+    // Navigation STARTUP
+    // =========================================================
+
     void start_navigation()
     {
         using ManageLifecycleNodes =
@@ -255,10 +541,12 @@ private:
 
 
         // STARTUP = 0
-        request->command = 0;
+        request->command =
+            0;
 
 
-        request_in_flight_ = true;
+        request_in_flight_ =
+            true;
 
 
         RCLCPP_INFO(
@@ -267,106 +555,216 @@ private:
         );
 
 
-        navigation_lifecycle_client_->async_send_request(
+        navigation_lifecycle_client_->
+            async_send_request(
+                request,
 
-            request,
-
-            [this](
-                rclcpp::Client<
-                    nav2_msgs::srv::ManageLifecycleNodes
-                >::SharedFuture future)
-            {
-                request_in_flight_ = false;
-
-                try
+                [this](
+                    rclcpp::Client<
+                        nav2_msgs::srv::ManageLifecycleNodes
+                    >::SharedFuture future
+                )
                 {
-                    auto response =
-                        future.get();
+                    request_in_flight_ =
+                        false;
 
 
-                    if (response->success)
+                    try
                     {
-                        navigation_started_ = true;
+                        auto response =
+                            future.get();
 
-                        RCLCPP_INFO(
-                            this->get_logger(),
-                            "Navigation Lifecycle STARTUP 성공"
-                        );
+
+                        if (response->success)
+                        {
+                            navigation_started_ =
+                                true;
+
+
+                            RCLCPP_INFO(
+                                this->get_logger(),
+                                "========================================"
+                            );
+
+                            RCLCPP_INFO(
+                                this->get_logger(),
+                                "Navigation Lifecycle STARTUP 성공"
+                            );
+
+                            RCLCPP_INFO(
+                                this->get_logger(),
+                                "Localization Ready Gate 완료"
+                            );
+
+                            RCLCPP_INFO(
+                                this->get_logger(),
+                                "========================================"
+                            );
+                        }
+                        else
+                        {
+                            RCLCPP_ERROR(
+                                this->get_logger(),
+                                "Navigation Lifecycle STARTUP 실패 - 조건 재확인 후 재시도"
+                            );
+                        }
                     }
-                    else
+                    catch (
+                        const std::exception & e
+                    )
                     {
                         RCLCPP_ERROR(
                             this->get_logger(),
-                            "Navigation Lifecycle STARTUP 실패 - 재시도"
+                            "Navigation Lifecycle service 오류: %s",
+                            e.what()
                         );
                     }
                 }
-                catch (const std::exception & e)
-                {
-                    RCLCPP_ERROR(
-                        this->get_logger(),
-                        "Navigation Lifecycle service 오류: %s",
-                        e.what()
-                    );
-                }
-            }
-        );
+            );
     }
 
 
-    bool scan_received_;
-    bool odom_received_;
-    bool amcl_pose_received_;
+    // =========================================================
+    // Parameters
+    // =========================================================
 
-    bool request_in_flight_;
-    bool navigation_started_;
+    double
+        scan_timeout_sec_;
 
+
+    double
+        odom_timeout_sec_;
+
+
+    double
+        amcl_pose_timeout_sec_;
+
+
+    // =========================================================
+    // Receive State
+    // =========================================================
+
+    bool
+        scan_received_;
+
+
+    bool
+        odom_received_;
+
+
+    bool
+        amcl_pose_received_;
+
+
+    std::chrono::steady_clock::time_point
+        last_scan_time_;
+
+
+    std::chrono::steady_clock::time_point
+        last_odom_time_;
+
+
+    std::chrono::steady_clock::time_point
+        last_amcl_pose_time_;
+
+
+    // =========================================================
+    // Lifecycle State
+    // =========================================================
+
+    bool
+        request_in_flight_;
+
+
+    bool
+        navigation_started_;
+
+
+    // =========================================================
+    // Subscribers
+    // =========================================================
 
     rclcpp::Subscription<
         sensor_msgs::msg::LaserScan
-    >::SharedPtr scan_sub_;
+    >::SharedPtr
+        scan_sub_;
 
 
     rclcpp::Subscription<
         nav_msgs::msg::Odometry
-    >::SharedPtr odom_sub_;
+    >::SharedPtr
+        odom_sub_;
 
 
     rclcpp::Subscription<
         geometry_msgs::msg::PoseWithCovarianceStamped
-    >::SharedPtr amcl_pose_sub_;
+    >::SharedPtr
+        amcl_pose_sub_;
 
+
+    // =========================================================
+    // Lifecycle Client
+    // =========================================================
 
     rclcpp::Client<
         nav2_msgs::srv::ManageLifecycleNodes
-    >::SharedPtr navigation_lifecycle_client_;
+    >::SharedPtr
+        navigation_lifecycle_client_;
 
+
+    // =========================================================
+    // TF
+    // =========================================================
 
     std::unique_ptr<
         tf2_ros::Buffer
-    > tf_buffer_;
+    >
+        tf_buffer_;
 
 
     std::shared_ptr<
         tf2_ros::TransformListener
-    > tf_listener_;
+    >
+        tf_listener_;
 
+
+    // =========================================================
+    // Timer
+    // =========================================================
 
     rclcpp::TimerBase::SharedPtr
         check_timer_;
 };
 
 
-int main(int argc, char * argv[])
+// =============================================================
+// MAIN
+// =============================================================
+
+int main(
+    int argc,
+    char * argv[]
+)
 {
-    rclcpp::init(argc, argv);
+    rclcpp::init(
+        argc,
+        argv
+    );
+
 
     auto node =
-        std::make_shared<LocalizationReadyGate>();
+        std::make_shared<
+            LocalizationReadyGate
+        >();
 
-    rclcpp::spin(node);
+
+    rclcpp::spin(
+        node
+    );
+
 
     rclcpp::shutdown();
+
 
     return 0;
 }

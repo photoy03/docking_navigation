@@ -21,6 +21,8 @@ from launch.substitutions import (
     LaunchConfiguration
 )
 
+from launch.conditions import IfCondition
+
 from launch_ros.actions import Node
 
 
@@ -87,6 +89,8 @@ def generate_launch_description():
     nav2_params = LaunchConfiguration(
         'params_file'
     )
+
+    use_rviz = LaunchConfiguration('use_rviz')
     
     rviz_config = os.path.join(
     nav2_bringup_dir,
@@ -145,6 +149,11 @@ def generate_launch_description():
             default_value=default_nav2_params
         ),
 
+        DeclareLaunchArgument(
+            'use_rviz',
+            default_value='true',
+            description='Launch RViz2'
+        ),
 
         # ==================================================
         # 1. RPLidar
@@ -608,6 +617,7 @@ def generate_launch_description():
             parameters=[
                 {'use_sim_time': False}
             ],
+            condition=IfCondition(use_rviz),
             output='screen'
         ),
 
