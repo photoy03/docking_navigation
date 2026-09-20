@@ -488,12 +488,24 @@ Serial::SerialImpl::available ()
   if (!is_open_) {
     return 0;
   }
-  int count = 0;
-  if (-1 == ioctl (fd_, TIOCINQ, &count)) {
-      THROW (IOException, errno);
-  } else {
-      return static_cast<size_t> (count);
+
+  // Ntrex MW_AHRS_Read() repeatedly calls available().
+  // The original implementation performs FIONREAD immediately,
+  // causing busy polling when the serial buffer is empty.
+  //
+  // Wait for readability for at most 1 ms.
+  // If data is already buffered, pselect() returns immediately.
+  if (!waitReadable(1)) {
+    return 0;
   }
+
+  int count = 0;
+
+  if (-1 == ioctl(fd_, TIOCINQ, &count)) {
+    THROW(IOException, errno);
+  }
+
+  return static_cast<size_t>(count);
 }
 
 bool
